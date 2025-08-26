@@ -11,3 +11,139 @@ Scenario
 You are Bob, a Customer Service Manager at AnyCompany, and some of your customers are not happy with the customer service and are providing negative feedback on the service provided by customer support engineers. Now, you would like to respond to those customers humbly, apologizing for the poor service and regain their trust. You need the help of a Large Language Model (LLM) to generate a bulk of emails for you, which are human-friendly and personalized to the customer's sentiment from previous email correspondence.
 
 In this scenario, you can leverage the power of LangChain's PromptTemplates to create a generic shell for generating personalized email responses based on the customer's previous email. The PromptTemplate will incorporate the customer's original email content, allowing the LLM to understand the context and sentiment, and then generate a relevant and customized response.
+
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Task 1b.1: Environment setup
+In this task, you set up your environment.
+
+
+
+#Create a service client by name using the default session.
+import json
+import os
+import sys
+import warnings
+
+import boto3
+
+warnings.filterwarnings('ignore')
+module_path = ".."
+sys.path.append(os.path.abspath(module_path))
+
+
+bedrock_client = boto3.client('bedrock-runtime',region_name=os.environ.get("AWS_DEFAULT_REGION", None))
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Task 1b.2: Invoke the Bedrock LLM Model
+In this task, you create an instance of the Bedrock class from llms. This expects a model_id which is the Amazon Resource Name (ARN) of the model available in Amazon Bedrock.
+
+Optionally, you can pass a previously created boto3 client as well as some model_kwargs which can hold parameters such as temperature, top_p, max_token_count, or stop_sequences (more information on parameters can be explored in the Amazon Bedrock console).
+
+Refer to documentation for Available text generation model Ids under Amazon Bedrock.
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+# Model configuration
+from langchain_aws import ChatBedrock
+from langchain_core.output_parsers import StrOutputParser
+
+model_id = "amazon.nova-lite-v1:0"
+model_kwargs =  { 
+        "max_tokens": 512,
+        "temperature": 0,
+        "top_p": 1,
+}
+
+# LangChain class for chat
+chat_model = ChatBedrock(
+    client=bedrock_client,
+    model_id=model_id,
+    model_kwargs=model_kwargs,
+)
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Task 1b.3: Create a LangChain custom prompt template
+In this task, you will create a template for the prompt that you can pass different input variables on every run. This is useful when you have to generate content with different input variables that you may be fetching from a database.
+
+In the previous task, we hardcoded the prompt. It might be the case that you have multiple customers sending similar negative feedback, and you now want to use each of those customers' emails and respond to them with an apology, but you also want to keep the response a bit personalized. In the following cell, you will explore how you can create a PromptTemplate to achieve this pattern.
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+# Create a prompt template that has multiple input variables
+from langchain.prompts import PromptTemplate
+
+multi_var_prompt = PromptTemplate(
+    input_variables=["customerServiceManager", "customerName", "feedbackFromCustomer"], 
+    template="""
+
+Human: Create an apology email from the Service Manager {customerServiceManager} at AnyCompany to {customerName} in response to the following feedback that was received from the customer: 
+<customer_feedback>
+{feedbackFromCustomer}
+</customer_feedback>
+
+Assistant:"""
+)
+
+# Pass in values to the input variables
+prompt = multi_var_prompt.format(customerServiceManager="Bob Smith", 
+                                 customerName="John Doe", 
+                                 feedbackFromCustomer="""Hello Bob,
+     I am very disappointed with the recent experience I had when I called your customer support.
+     I was expecting an immediate call back but it took three days for us to get a call back.
+     The first suggestion to fix the problem was incorrect. Ultimately the problem was fixed after three days.
+     We are very unhappy with the response provided and may consider taking our business elsewhere.
+     """
+     )
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# get number of tokens
+num_tokens = chat_model.get_num_tokens(prompt)
+print(f"Our prompt has {num_tokens} tokens")
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+#invoke
+response = chat_model.invoke(prompt)
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Configure a Chain to parse output
+chain = StrOutputParser()
+formatted_response=chain.invoke(response)
+print(formatted_response)
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+You have successfully learned that invoking the LLM without any context might not yield the desired results. By adding context and further using the prompt template to constrain the output from the LLM, you were able to successfully obtain your desired output.
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Try it yourself
+Change the prompts to your specific usecase and evaluate the output of different models.
+Play with the token length to understand the latency and responsiveness of the service.
+Apply different prompt engineering principles to get better outputs.
+
+
+
+Cleanup
+You have completed this notebook. To move to the next part of the lab, do the following:
+
+Close this notebook file.
+Return to the lab session and continue with Task 2.
+
