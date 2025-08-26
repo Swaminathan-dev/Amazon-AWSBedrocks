@@ -1,0 +1,163 @@
+
+# Task 2a: Text summarization with small files with Amazon Nova Lite
+
+In this notebook, you ingest a small string of text directly into the Amazon Bedrock API (using the Amazon Nova Lite model) and instruct it to summarize the input text. You can apply this approach to summarize call transcripts, meeting transcripts, books, articles, blog posts, and other relevant content when the input text length is within the context size limits of the model.
+
+
+Task 2a.1: Environment setup
+
+#Create a service client by name using the default session.
+import json
+import os
+import sys
+import warnings
+
+import boto3
+import botocore
+
+warnings.filterwarnings('ignore')
+module_path = ".."
+sys.path.append(os.path.abspath(module_path))
+
+bedrock_client = boto3.client('bedrock-runtime',region_name=os.environ.get("AWS_DEFAULT_REGION", None))
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Task 2a.2: Writing prompt with text to be summarized
+
+In this task, you use a short passage of text with fewer tokens than the maximum length supported by the foundation model. As a sample input text for this lab, you use a paragraph from an AWS blog post announcing Amazon Bedrock.
+
+The prompt starts with an instruction Please provide a summary of the following text..
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+prompt_data = """
+
+Please provide a summary of the following text:
+
+AWS took all of that feedback from customers, and today we are excited to announce Amazon Bedrock, a new service that makes FMs from AI21 Labs, Anthropic, Stability AI, and Amazon accessible via an API. Bedrock is the easiest way for customers to build and scale generative AI-based applications using FMs, democratizing access for all builders. Bedrock will offer the ability to access a range of powerful FMs for text and images—including Amazons Titan FMs, which consist of two new LLMs we're also announcing today—through a scalable, reliable, and secure AWS managed service. With Bedrock's serverless experience, customers can easily find the right model for what they're trying to get done, get started quickly, privately customize FMs with their own data, and easily integrate and deploy them into their applications using the AWS tools and capabilities they are familiar with, without having to manage any infrastructure (including integrations with Amazon SageMaker ML features like Experiments to test different models and Pipelines to manage their FMs at scale).
+"""
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+## Task 2a.3: Creating request body with prompt and inference parameters 
+
+In this task, you create the request body with the above prompt and inference parameters.
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+# Nova Lite request body
+body = json.dumps({
+    "messages": [
+        {
+            "role": "user",
+            "content": [{"text": prompt_data}]
+        }
+    ],
+    "inferenceConfig": {
+        "maxTokens": 2048,
+        "temperature": 0,
+        "topP": 0.9
+    }
+})
+
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Task 2a.4: Invoke foundation model via Boto3
+In this task, you send an API request to Amazon Bedrock specifying the request parameters: modelId, accept, and contentType. Following the provided prompt, the foundation model in Amazon Bedrock then summarizes the input text.
+
+Complete Output Generation¶
+By default, the Amazon Bedrock service generates the entire summary for a given prompt in a single output. This can be slow if the model output contains many tokens.
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+#model configuration and invoke the model
+modelId = 'amazon.nova-lite-v1:0'
+accept = 'application/json'
+contentType = 'application/json'
+outputText = "\n"
+
+try:
+
+    response = bedrock_client.invoke_model(body=body, modelId=modelId, accept=accept, contentType=contentType)
+    response_body = json.loads(response.get('body').read())
+    
+    outputText = response_body.get('output').get('message').get('content')[0].get('text')
+
+except botocore.exceptions.ClientError as error:
+    
+    if error.response['Error']['Code'] == 'AccessDeniedException':
+           print(f"\x1b[41m{error.response['Error']['Message']}\nTo troubeshoot this issue please refer to the following resources.\nhttps://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot_access-denied.html\nhttps://docs.aws.amazon.com/bedrock/latest/userguide/security-iam.html\x1b[0m\n")
+        
+    else:
+        raise error
+
+print(outputText)
+
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Streaming Output Generation
+Next, you explore how to use Amazon Bedrock's invoke_model_with_response_stream API to stream model outputs so users can consume outputs as they are generated. Rather than generating the full output at once, this API returns a ResponseStream that sends smaller output chunks from the model as they are produced. You can display these streaming outputs in a continuous, consumable view.
+
+When running the code below, you'll see the raw streaming response format, which consists of a list of chunk objects. Each chunk contains a binary payload that, when decoded, shows the text fragment along with metadata like token counts and completion status. For example, with Nova Lite, each chunk includes the text fragment, token counts, and stop reason indicators. This raw format demonstrates how the model generates content incrementally, word by word or phrase by phrase, rather than all at once. In the following cell, we'll process these chunks to create a more readable, continuous display of the generated content.
+
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+#invoke model with response stream
+modelId = 'amazon.nova-lite-v1:0'
+response = bedrock_client.invoke_model_with_response_stream(body=body, modelId=modelId, accept=accept, contentType=contentType)
+stream = response.get('body')
+
+# Collect only the first few chunks
+output = []
+for i, event in enumerate(stream):
+    output.append(event)
+    if i >= 4:  # Show only first 5 chunks
+        print(f"... and {i} more chunks (truncated)")
+        break
+
+# Display truncated output
+output
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+from IPython.display import display_markdown,Markdown,clear_output
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+modelId = 'amazon.nova-lite-v1:0'
+response = bedrock_client.invoke_model_with_response_stream(body=body, modelId=modelId, accept=accept, contentType=contentType)
+stream = response.get('body')
+output = []
+i = 1
+if stream:
+    for event in stream:
+        chunk = event.get('chunk')
+        if chunk:
+            chunk_obj = json.loads(chunk.get('bytes').decode())
+            if 'contentBlockDelta' in chunk_obj:
+                text = chunk_obj['contentBlockDelta']['delta']['text']
+                clear_output(wait=True)
+                output.append(text)
+                display_markdown(Markdown(''.join(output)))
+                i+=1
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+You have now experimented with using the boto3 SDK to access the Amazon Bedrock API. This SDK provides basic programmatic access to Bedrock capabilities. By leveraging this API, you were able to implement two use cases: 1) Generating an entire text summary of AWS news content at once, and 2) Streaming the summary output in chunks for incremental processing.
+
+Try it yourself
+Change the prompts to your specific usecase and evaluate the output of different models.
+Play with the token length to understand the latency and responsiveness of the service.
+Apply different prompt engineering principles to get better outputs.
+Cleanup
+You have completed this notebook. To move to the next part of the lab, do the following:
+
+Close this notebook file and continue with Task2b.ipynb.
+
+                
+
+
+
