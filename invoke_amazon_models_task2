@@ -1,0 +1,13 @@
+Task 1b: Perform Text Generation using a prompt that includes Context
+In this notebook, you will learn how to generate an email response to a customer who was not happy with the quality of customer service they received from the customer support engineer. You will provide additional context to the model by including the contents of the actual email received from the unhappy customer.
+
+You will add more complexity with the help of PromptTemplates to leverage the LangChain framework for a similar use case. PromptTemplates allow you to create generic shells which can be populated with information later and obtain model outputs based on different scenarios.
+
+LangChain is a framework for developing applications powered by language models. The key aspects of this framework allow us to augment the Large Language Models by chaining together various components to create advanced use cases.
+
+Due to the additional context in the prompt, the content produced in this notebook is of much better quality and relevance than the content produced earlier through zero-shot prompts. The prompt used in this notebook creates a custom LangChain prompt template for adding context to the text generation request.
+
+Scenario
+You are Bob, a Customer Service Manager at AnyCompany, and some of your customers are not happy with the customer service and are providing negative feedback on the service provided by customer support engineers. Now, you would like to respond to those customers humbly, apologizing for the poor service and regain their trust. You need the help of a Large Language Model (LLM) to generate a bulk of emails for you, which are human-friendly and personalized to the customer's sentiment from previous email correspondence.
+
+In this scenario, you can leverage the power of LangChain's PromptTemplates to create a generic shell for generating personalized email responses based on the customer's previous email. The PromptTemplate will incorporate the customer's original email content, allowing the LLM to understand the context and sentiment, and then generate a relevant and customized response.
