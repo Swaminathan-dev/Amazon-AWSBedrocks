@@ -1,0 +1,541 @@
+Task 4: Conversational Interface - Chat with Nova Lite and Titan Embedding LLMs
+In this notebook, you build a chatbot using the Nova Lite and Titan Embeddings Foundation Models (FMs) in Amazon Bedrock.
+
+Conversational interfaces such as chatbots and virtual assistants can enhance the user experience for your customers. Chatbots use natural language processing (NLP) and machine learning algorithms to understand and respond to user queries. You can use chatbots in a variety of applications, such as customer service, sales, and e-commerce, to provide quick and efficient responses to users. Users can access them through various channels such as websites, social media platforms, and messaging apps.
+
+Chatbot (Basic), Zero Shot chatbot with a FM model
+Chatbot using prompt, template(LangChain) - Chatbot with some context provided in the prompt template
+Chatbot with persona, Chatbot with defined roles. i.e. Career Coach and Human interactions
+Contextual-aware chatbot, Passing in context through an external file by generating embeddings.
+LangChain framework for building Chatbot with Amazon Bedrock
+In conversational interfaces such as chatbots, remembering previous interactions becomes highly important, both at a short-term and long-term level.
+
+The LangChain framework provides memory components in two forms. First, LangChain provides helper utilities for managing and manipulating previous chat messages. These are designed to be modular. Secondly, LangChain provides easy ways to incorporate these utilities into chains, allowing you to easily define and interact with different types of abstractions, which make powerful chatbots easy for you to build.
+
+Building a Chatbot with Context - Key Elements
+The first process in building a context-aware chatbot is to generate embeddings for the context. Typically, you have an ingestion process which runs through your embedding model and generates the embeddings, which will then be stored in a vector store. In this notebook, you use the Titan Embeddings model for this. The second process is user request orchestration, interaction, invoking, and returning the results. This involves orchestrating the user request, interacting with the necessary models/components to gather information, invoking the chatbot to formulate a response, and then returning the chatbot's response back to the user.
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+## Task 4.1: Environment setup
+
+In this task, you set up your environment.
+
+#ignore warnings and create a service client by name using the default session.
+import json
+import os
+import sys
+import warnings
+
+import boto3
+
+warnings.filterwarnings('ignore')
+module_path = ".."
+sys.path.append(os.path.abspath(module_path))
+bedrock_client = boto3.client('bedrock-runtime',region_name=os.environ.get("AWS_DEFAULT_REGION", None))
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+### Resource Optimization Utilities
+
+In this section, we create a decorator that optimizes API resource usage and improves request reliability. This decorator implements several best practices for working with cloud-based AI services
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+import time
+import random
+from functools import wraps
+
+# Resource optimization decorator for API efficiency
+def optimize_resource_usage(max_attempts=10, base_pause=10.0):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_attempts):
+                try:
+                    # Space out requests for optimal service performance
+                    if attempt > 0:
+                        time.sleep(10.0)
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    error_str = str(e)
+                    # Check if this is a service capacity exception
+                    if any(err in error_str for err in ["ThrottlingException", "TooManyRequests", 
+                                                     "Too many tokens", "Rate exceeded"]):
+                        if attempt < max_attempts - 1:
+                            # Implement progressive backoff with jitter
+                            jitter = random.random() * 0.5
+                            wait_time = min(base_pause * (2 ** attempt) + jitter, 60)
+                            
+                            print(f"⏱️ Optimizing request timing. Pausing for {wait_time:.1f}s (attempt {attempt+1}/{max_attempts})")
+                            time.sleep(wait_time)
+                        else:
+                            print("⚠️ Maximum attempts reached. Consider spacing out operations.")
+                            raise
+                    else:
+                        raise
+        return wrapper
+    return decorator
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+Understanding Resource Optimization
+The code above implements an intelligent approach to API management that:
+
+Spaces out requests to maintain optimal throughput
+Automatically retries when temporary capacity limits are reached
+Implements exponential backoff by progressively increasing wait times
+Adds randomized jitter to prevent request clustering
+These techniques are standard industry practices for working with cloud-based AI services and ensure your application remains responsive even under challenging conditions.
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Enhanced Bedrock Model Classes
+Next, we create specialized versions of the Bedrock model classes that automatically incorporate the resource optimization techniques. These classes extend the standard LangChain implementations while adding reliability features that are essential for production applications.
+
+By wrapping the critical API methods with our optimization decorator, we ensure consistent behavior when communicating with the Bedrock services.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+from langchain_aws import ChatBedrock
+from langchain_aws.embeddings import BedrockEmbeddings
+
+# Enhanced ChatBedrock with resource optimization
+class ResourceOptimizedChatBedrock(ChatBedrock):
+    """Wrapper that optimizes resource usage and handles service capacity constraints."""
+    
+    @optimize_resource_usage(max_attempts=10)
+    def _call_model(self, *args, **kwargs):
+        return super()._call_model(*args, **kwargs)
+    
+    @optimize_resource_usage(max_attempts=10)
+    def _generate(self, *args, **kwargs):
+        return super()._generate(*args, **kwargs)
+        
+# Enhanced BedrockEmbeddings with resource optimization
+class ResourceOptimizedEmbeddings(BedrockEmbeddings):
+    """Wrapper for BedrockEmbeddings with intelligent resource management."""
+    
+    @optimize_resource_usage(max_attempts=10)
+    def _embed_documents(self, texts):
+        return super()._embed_documents(texts)
+        
+    @optimize_resource_usage(max_attempts=10)
+    def _embed_query(self, text):
+        return super()._embed_query(text)
+        
+    @optimize_resource_usage(max_attempts=10)
+    def embed_documents(self, texts):
+        return super().embed_documents(texts)
+        
+    @optimize_resource_usage(max_attempts=10)
+    def embed_query(self, text):
+        return super().embed_query(text)
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+These enhanced classes:
+
+- Apply resource optimization to all critical API methods
+- Maintain full compatibility with the standard LangChain interfaces
+- Automatically handle intermittent service capacity issues
+- Provide consistent behavior across both chat and embedding operations
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Building a Conversational Memory
+One of the most important features of an effective chatbot is its ability to remember previous interactions. Without memory, each message would be treated in isolation, creating a disjointed experience.
+
+In this section, we implement conversational memory using LangChain's InMemoryChatMessageHistory class. This allows our chatbot to reference previous exchanges and maintain context throughout the conversation.
+
+Conversation Formatting Utilities
+This section implements a utility function that correctly formats multi-role conversations for large language models. The format follows the specific requirements of the Nova Lite model token format.
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# format instructions into a conversational prompt
+from typing import Dict, List
+
+def format_instructions(instructions: List[Dict[str, str]]) -> List[str]:
+    """Format instructions where conversation roles must alternate system/user/assistant/user/assistant/..."""
+    prompt: List[str] = []
+    for instruction in instructions:
+        if instruction["role"] == "system":
+            prompt.extend(["<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n", (instruction["content"]).strip(), " <|eot_id|>"])
+        elif instruction["role"] == "user":
+            prompt.extend(["<|start_header_id|>user<|end_header_id|>\n", (instruction["content"]).strip(), " <|eot_id|>"])
+        else:
+            raise ValueError(f"Invalid role: {instruction['role']}. Role must be either 'user' or 'system'.")
+    prompt.extend(["<|start_header_id|>assistant<|end_header_id|>\n"])
+    return "".join(prompt)
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Task 4.2: Using chat history from LangChain to start the conversation
+
+In this task, you enable the chatbot to carry conversational context across multiple interactions with users. Having a conversational memory is crucial for Chatbots to hold meaningful, coherent dialogues over time.
+
+You implement conversational memory capabilities by building on top of LangChain's InMemoryChatMessageHistory class. This object stores the conversations between the user and the chatbot, and the history is available the chatbot agent so that it can leverage the context from a previous conversation.
+
+The model outputs are non-deterministic.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+New Questions
+The model has responded with an initial message. Now, you ask it a few questions.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+#new questions
+instructions = [{"role": "user", "content": "Give me a few tips on how to start a new garden."}]
+response=wrapped_chain.invoke({"input": format_instructions(instructions)})
+print(response)
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Build on the questions
+Now, ask a question without mentioning the word garden to see if the model can understand the previous conversation.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# build on the questions
+instructions = [{"role": "user", "content": "bugs"}]
+response=wrapped_chain.invoke({"input": format_instructions(instructions)})
+print(response)
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Finishing this conversation¶
+
+
+# finishing the conversation
+instructions = [{"role": "user", "content": "That's all, thank you!"}]
+response=wrapped_chain.invoke({"input": format_instructions(instructions)})
+print(response)
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+Task 4.3: Chatbot using prompt template (LangChain)
+Using Prompt Templates for Consistent Interactions
+Prompt engineering is a critical aspect of working with large language models. By using templates, we can structure our prompts consistently and control how the model responds in different scenarios.
+
+LangChain's prompt templates provide a standardized way to format inputs for different conversation roles (system, user, assistant), ensuring the model receives properly structured context.
+
+In this task, you use the default PromptTemplate that is responsible for the construction of this input. LangChain provides several classes and functions to make constructing and working with prompts easy.
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+#  prompt for a conversational agent
+def format_prompt(actor:str, input:str):
+    formatted_prompt: List[str] = []
+    if actor == "system":
+        prompt_template="""<|begin_of_text|><|start_header_id|>{actor}<|end_header_id|>\n{input}<|eot_id|>"""
+    elif actor == "user":
+        prompt_template="""<|start_header_id|>{actor}<|end_header_id|>\n{input}<|eot_id|>"""
+    else:
+        raise ValueError(f"Invalid role: {actor}. Role must be either 'user' or 'system'.")   
+    prompt = PromptTemplate.from_template(prompt_template)     
+    formatted_prompt.extend(prompt.format(actor=actor,input=input))
+    formatted_prompt.extend(["<|start_header_id|>assistant<|end_header_id|>\n"])
+    return "".join(formatted_prompt)
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+# chat user experience
+import ipywidgets as ipw
+from IPython.display import display, clear_output
+
+class ChatUX:
+    """ A chat UX using IPWidgets
+    """
+    def __init__(self, qa, retrievalChain = False):
+        self.qa = qa
+        self.name = None
+        self.b=None
+        self.retrievalChain = retrievalChain
+        self.out = ipw.Output()
+
+
+    def start_chat(self):
+        print("Starting chat bot")
+        display(self.out)
+        self.chat(None)
+
+
+    def chat(self, _):
+        if self.name is None:
+            prompt = ""
+        else: 
+            prompt = self.name.value
+        if 'q' == prompt or 'quit' == prompt or 'Q' == prompt:
+            with self.out:
+                print("Thank you , that was a nice chat !!")
+            return
+        elif len(prompt) > 0:
+            with self.out:
+                thinking = ipw.Label(value="Thinking...")
+                display(thinking)
+                try:
+                    if self.retrievalChain:
+                        response = self.qa.invoke({"input": prompt})
+                        result=response['answer']
+                    else:
+                        instructions = [{"role": "user", "content": prompt}]
+                        #result = self.qa.invoke({'input': format_prompt("user",prompt)}) #, 'history':chat_history})
+                        result = self.qa.invoke({"input": format_instructions(instructions)})
+                except:
+                    result = "No answer"
+                thinking.value=""
+                print(f"AI:{result}")
+                self.name.disabled = True
+                self.b.disabled = True
+                self.name = None
+
+        if self.name is None:
+            with self.out:
+                self.name = ipw.Text(description="You:", placeholder='q to quit')
+                self.b = ipw.Button(description="Send")
+                self.b.on_click(self.chat)
+                display(ipw.Box(children=(self.name, self.b)))
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Next, start a chat.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# start chat
+history = InMemoryChatMessageHistory() #reset chat history
+chat = ChatUX(wrapped_chain)
+chat.start_chat()
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+print(history)
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Task 4.4: Chatbot with persona
+In this task, Artificial Intelligence(AI) assistant plays the role of a career coach. You can inform the chatbot about its persona (or role) using a system message. Continue to leverage the InMemoryChatMessageHistory class to maintain conversational context
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", " You will be acting as a career coach. Your goal is to give career advice to users. For questions that are not career related, don't provide advice. Say, I don't know."),
+        ("placeholder", "{chat_history}"),
+        ("human", "{input}"),
+    ]
+)
+
+history = InMemoryChatMessageHistory() # reset history
+
+chain = prompt | chat_model | StrOutputParser()
+
+wrapped_chain = RunnableWithMessageHistory(
+    chain,
+    get_history,
+    history_messages_key="career_chat_history",
+)
+
+response=wrapped_chain.invoke({"input": "What are the career options in AI?"})
+print(response)
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+response=wrapped_chain.invoke({"input": "How to fix my car?"})
+print(response)
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+print(history)
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Now, ask a question that is not within this persona's specialty. The model should not answer that question and should give a reason for that.
+
+Task 4.5 Chatbot with Context
+In this task, you ask the chatbot to answer questions based on context that was passed to it. You take a CSV file and use the Titan embeddings model to create a vector representing that context. This vector is stored in Facebook AI Similarity Search (FAISS). When the chatbot is asked a question, you will pass this vector back to the chatbot and have it retrieve the answer using the vector.
+
+Retrieval-Augmented Generation (RAG)
+Traditional chatbots are limited to the knowledge contained in their training data. RAG overcomes this limitation by:
+
+Creating vector embeddings of your custom documents
+Storing these vectors in a searchable database (like FAISS)
+Retrieving relevant context when answering questions
+Augmenting the LLM prompt with this additional context
+This approach allows the chatbot to leverage both its trained knowledge and your specific information sources when generating responses.
+
+Titan embeddings Model
+Embeddings represent words, phrases, or any other discrete items as vectors in a continuous vector space. This allows machine learning models to perform mathematical operations on these representations and capture semantic relationships between them.
+
+You use embeddings for the Retrieval-Augmented Generation (RAG) document search capability.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# model configuration
+from langchain_aws.embeddings import BedrockEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.prompts import PromptTemplate
+
+br_embeddings = ResourceOptimizedEmbeddings(
+    model_id="amazon.titan-embed-text-v1",
+    client=bedrock_client
+)
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+FAISS as VectorStore
+In order to use embeddings for search, you need a store that can efficiently perform vector similarity searches. In this notebook, you use FAISS, which is an in-memory store. To permanently store vectors, you can use Knowledge Bases for Amazon Bedrock, pgVector, Pinecone, Weaviate, or Chroma.
+
+The LangChain VectorStore APIs are available here.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+# vector store
+from langchain.document_loaders import CSVLoader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.indexes.vectorstore import VectorStoreIndexWrapper
+
+loader = CSVLoader("../rag_data/Amazon_SageMaker_FAQs.csv") # --- > 219 docs with 400 chars
+documents_aws = loader.load() #
+print(f"documents:loaded:size={len(documents_aws)}")
+
+docs = CharacterTextSplitter(chunk_size=2000, chunk_overlap=400, separator=",").split_documents(documents_aws)
+
+print(f"Documents:after split and chunking size={len(docs)}")
+vectorstore_faiss_aws = None
+try:
+    
+    vectorstore_faiss_aws = FAISS.from_documents(
+        documents=docs,
+        embedding = br_embeddings, 
+        #**k_args
+    )
+
+    print(f"vectorstore_faiss_aws:created={vectorstore_faiss_aws}::")
+
+except ValueError as error:
+    if  "AccessDeniedException" in str(error):
+        print(f"\x1b[41m{error}\
+        \nTo troubeshoot this issue please refer to the following resources.\
+         \nhttps://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot_access-denied.html\
+         \nhttps://docs.aws.amazon.com/bedrock/latest/userguide/security-iam.html\x1b[0m\n")      
+        class StopExecution(ValueError):
+            def _render_traceback_(self):
+                pass
+        raise StopExecution        
+    else:
+        raise error
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Run a quick low code test
+You can use a Wrapper class provided by LangChain to query the vector database store and return the relevant documents. This runs a QA Chain with all default values.
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+chat_llm = ResourceOptimizedChatBedrock(
+    model_id="amazon.nova-lite-v1:0",
+    client=bedrock_client
+)
+
+# wrapper store faiss
+wrapper_store_faiss = VectorStoreIndexWrapper(vectorstore=vectorstore_faiss_aws)
+print(wrapper_store_faiss.query("R in SageMaker", llm=chat_llm))
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Chatbot application
+For the chatbot, you need context management, history, vector stores, and many other components. You start by building a Retrieval Augmented Generation (RAG) chain that supports context.
+
+This uses the create_stuff_documents_chain and create_retrieval_chain functions
+
+
+
+Parameters and functions used for RAG
+Retriever: You used VectorStoreRetriever, which is backed by a VectorStore. To retrieve text, there are two search types to choose from: "similarity" or "mmr". search_type="similarity" uses similarity search in the retriever object, where it selects text chunk vectors that are most similar to the question vector.
+
+create_stuff_documents_chain specifies how retrieved context is fed into a prompt and LLM. Retrieved documents are "stuffed" as context without any summarization or other processing into the prompt.
+
+create_retrieval_chain adds the retrieval step and propagates the retrieved context through the chain, providing it alongside the final answer.
+
+If the question asked falls outside the scope of the context, the model will reply that it doesn't know the answer.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate
+
+system_prompt = (
+    "You are an assistant for question-answering tasks. "
+    "Use the following pieces of retrieved context to answer "
+    "the question. If you don't know the answer, say that you "
+    "don't know. Use three sentences maximum and keep the "
+    "answer concise."
+    "\n\n"
+    "{context}"
+)
+
+prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", system_prompt),
+        ("human", "{input}"),
+    ]
+)
+
+retriever=vectorstore_faiss_aws.as_retriever()
+question_answer_chain = create_stuff_documents_chain(chat_llm, prompt)
+rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+
+response = rag_chain.invoke({"input": "What is sagemaker?"})
+print(response) # shows the document chunks consulted to come up with the answer
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Next, start a chat
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+chat = ChatUX(rag_chain, retrievalChain=True)
+chat.start_chat()  # Only answers will be shown here, and not the citations
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+You have utilized Nova Lite and Titan LLMs to create a conversational interface with following patterns:
+
+Chatbot (Basic - without context)
+Chatbot using prompt template(Langchain)
+Chatbot with personas
+Chatbot with context
+Try it yourself
+Change the prompts to your specific usecase and evaluate the output of different models.
+Play with the token length to understand the latency and responsiveness of the service.
+Apply different prompt engineering principles to get better outputs.
+Cleanup
+You have completed this notebook. To move to the next part of the lab, do the following:
+
+Close this notebook file and continue with Task 5.
+
+
+
+
