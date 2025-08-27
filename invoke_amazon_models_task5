@@ -1,0 +1,564 @@
+Task 3: Use Amazon Bedrock for Question Answering
+In this notebook, you learn how to use the Bedrock Nova Lite model to provide information responses to queries by sending the request with the full relevant context to the model and expecting the response back, addressing the challenge of having the model return factual answers for questions without needing to prepare and index documents beforehand.
+
+This notebook simulates what Retrieval-Augmented Generation (RAG) would do, but not actually using RAG. This approach works with short documents or single-ton applications; it might not scale to enterprise-level question answering where large enterprise documents cannot all be fit into the prompt sent to the model.
+
+Question Answering (QA) is an important task that involves extracting answers to factual queries posed in natural language. Typically, a QA system processes a query against a knowledge base containing structured or unstructured data and generates a response with accurate information. Ensuring high accuracy is key to developing a useful, reliable, and trustworthy question answering system, especially for enterprise use cases.
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Scenario
+You try modeling a situation at AnyCompany where you ask a question answering model to provide information about changing tires for a specific vehicle model they manufacture. You first query the model using a "zero shot" approach to see if it can provide relevant answers based just on its training data.
+
+However, you realize the model seems to be "hallucinating" more generic answers, as evidenced when you try a fake vehicle model and get similar responses. This implies the need to augment the model's training with Example Company's actual vehicle manuals to give specifics on tires for each model.
+
+In this lab, you simulate such a "Retrieval Augmented Generation" (RAG) approach without external data. You provide a detailed manual excerpt explaining how to change the tires on the AnyCompany Model Z vehicle. You test if the model can now give a customized, accurate answer leveraging this in-context example content.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Task 3.1: Environment setup
+
+#ignore warnings and create a service client by name using the default session.
+import json
+import os
+import sys
+import warnings
+
+import boto3
+import botocore
+
+warnings.filterwarnings('ignore')
+module_path = ".."
+sys.path.append(os.path.abspath(module_path))
+bedrock_client = boto3.client('bedrock-runtime',region_name=os.environ.get("AWS_DEFAULT_REGION", None))
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+"""
+Nova Lite Adapter:
+
+This code block contains helper functions for using Nova Lite.
+"""
+
+import json
+import time
+from botocore.exceptions import ClientError
+
+def format_for_nova_lite(prompt_text):
+    """Format the prompt for Nova Lite's expected message structure."""
+    return {
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"text": prompt_text}]
+            }
+        ],
+        "inferenceConfig": {
+            "maxTokens": 2048,
+            "temperature": 0,
+            "topP": 0.9
+        }
+    }
+
+def parse_nova_lite_response(response_body):
+    """Parse the response from Nova Lite."""
+    if 'output' in response_body and 'message' in response_body['output']:
+        message = response_body['output']['message']
+        if 'content' in message and isinstance(message['content'], list):
+            # Extract text from each content item
+            texts = []
+            for content_item in message['content']:
+                if isinstance(content_item, dict) and 'text' in content_item:
+                    texts.append(content_item['text'])
+            return ' '.join(texts)
+    
+    # Fallback if the response format is different
+    return str(response_body)
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Task 3.2: Q&A with the knowledge of the model
+In this section we try to use a model provided by Bedrock service to answer questions based on the knowledge it gained during the training phase.
+
+In this task, you use the invoke_model() method of the Amazon Bedrock client. The mandatory parameters required to use this method are modelId, which represents the Amazon Bedrock model ARN, and body, which is the prompt for your task.
+
+The body prompt changes depending on the foundation model provider you select. You walk through this in detail below.
+
+{
+   modelId= model_id,
+   contentType= "application/json",
+   accept= "application/json",
+   body=body
+}
+You try to use models provided by the Bedrock service to answer questions based on the knowledge gained during the training phase.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+prompt_data = """You are an helpful automotive assistant. Answer questions in a concise way. When answering questions about car maintenance or repairs, provide a detailed, numbered list of steps. Assume all cars, including the AnyCompany AC8, have a spare tire. If you are unsure about the
+answer say 'I am unsure'
+
+Question: How can I fix a flat tire on my AnyCompany AC8?
+Answer:"""
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Note: While running the code in upcoming tasks, you might observe ThrottlingException messages and retry attempts. Your code includes robust error handling that will automatically retry failed requests with exponential backoff. This is normal behavior when working with service quotas and demonstrates how production-ready applications should handle API limitations.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+## Task 3.3: Invoke the model by passing the JSON body to generate the response
+
+
+import json
+import time
+from botocore.exceptions import ClientError
+# Model configuration
+modelId = "amazon.nova-lite-v1:0"
+accept = "application/json"
+contentType = "application/json"
+
+# Retry configuration
+max_retries = 5
+retry_delay = 10  # seconds
+
+def invoke_model_with_retry(bedrock_client, modelId, prompt_text, contentType, accept, max_retries, retry_delay):
+    """Invoke the model with retry logic."""
+    # Format the prompt for Nova Lite
+    body = format_for_nova_lite(prompt_text)
+    
+    for attempt in range(max_retries):
+        try:
+            response = bedrock_client.invoke_model(
+                modelId=modelId,
+                body=json.dumps(body),
+                contentType=contentType,
+                accept=accept
+            )
+            
+            response_body = json.loads(response.get('body').read())
+            return parse_nova_lite_response(response_body)
+
+        except ClientError as error:
+            if error.response['Error']['Code'] == 'AccessDeniedException':
+                print(f"\x1b[41m{error.response['Error']['Message']}\\n\
+                \nTo troubleshoot this issue please refer to the following resources:\\n\
+                \nhttps://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot_access-denied.html\\n\
+                \nhttps://docs.aws.amazon.com/bedrock/latest/userguide/security-iam.html\x1b[0m\n")      
+                raise
+
+            elif error.response['Error']['Code'] in ['ThrottlingException', 'ServiceUnavailableException']:
+                if attempt < max_retries - 1:
+                    print(f"Service capacity reached. Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    print("Max retries reached. Unable to invoke the model.")
+                    raise
+
+            else:
+                print(f"An error occurred: {error}")
+                raise
+
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
+            raise
+
+# Main execution
+try:
+    result = invoke_model_with_retry(bedrock_client, modelId, prompt_data, contentType, accept, max_retries, retry_delay)
+    print(result)
+except Exception as e:
+    print(f"Failed to invoke the model after retries: {e}")
+
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+The model gives you an answer outlining the process of changing the car's flat tire, but the same explanation could be valid for any car. Unfortunately, this is not the right answer for an AnyCompany AC8, which does not have a spare tire. This occurs because the model has been trained on data containing instructions about changing tires on cars.
+
+Another example of this issue can be seen by trying to ask the same question for a completely fake car brand and model, say an Amazon Tirana.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+import json
+import time
+from botocore.exceptions import ClientError
+
+# Usage
+prompt_data = """How can I fix a flat tire on my Amazon Tirana?
+Answer: Here are the steps to fix a flat tire:
+"""
+
+def invoke_model_with_retry(prompt_data, max_retries=5, initial_delay=10):
+    modelId = "amazon.nova-lite-v1:0"
+    accept = "application/json"
+    contentType = "application/json"
+    
+    # Format the prompt for Nova Lite
+    body = json.dumps(format_for_nova_lite(prompt_data))
+    
+    for attempt in range(max_retries):
+        try:
+            response = bedrock_client.invoke_model(
+                body=body, 
+                modelId=modelId, 
+                accept=accept, 
+                contentType=contentType
+            )
+            response_body = json.loads(response.get("body").read())
+            return parse_nova_lite_response(response_body)
+
+        except ClientError as error:
+            error_code = error.response['Error']['Code']
+            
+            if error_code == 'AccessDeniedException':
+                print(f"\x1b[41m{error.response['Error']['Message']}\\n\
+                \nTo troubleshoot this issue please refer to the following resources:\\n\
+                \nhttps://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot_access-denied.html\\n\
+                \nhttps://docs.aws.amazon.com/bedrock/latest/userguide/security-iam.html\x1b[0m\n")
+                raise
+                
+            elif error_code in ['ThrottlingException', 'ServiceUnavailableException', 'ModelStreamLimitExceededException']:
+                if attempt < max_retries - 1:
+                    delay = initial_delay * (2 ** attempt)  # Exponential backoff
+                    print(f"Service capacity reached. Retrying in {delay} seconds...")
+                    print(f"Error: {error}")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"Max retries ({max_retries}) reached. Last error: {error}")
+                    raise
+            else:
+                print(f"Unhandled error occurred: {error}")
+                raise
+                
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt)
+                print(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+                continue
+            else:
+                raise
+
+try:
+    # Invoke model with retry logic
+    result = invoke_model_with_retry(prompt_data)
+    # Print the raw result
+    if result:
+        print(result.strip())
+    else:
+        print("No response generated from the model.")
+
+except Exception as e:
+    print(f"Failed to get response after all retries: {e}")
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Given the prompt question, the model is unable to provide a realistic answer.
+
+To fix this issue and have the model provide answers based on the specific instructions valid for your car model, you can augment the model's knowledge on-the-fly by providing an additional knowledge base as part of the prompt.
+
+Let's see how you can use this to improve your application.
+
+Assume the following is an excerpt from the manual of the AnyCompany AC8 (in reality, it is not the real manual, but treat it as such). This document is also conveniently short enough to fit entirely in the Nova Lite context window.
+
+Tires and Tire Pressure:
+
+Tires are made of black rubber and are mounted on the wheels of your vehicle. They provide the necessary grip for driving, cornering, and braking. Two important factors to consider are tire pressure and tire wear, as they can affect the performance and handling of your car.
+
+Where to Find Recommended Tire Pressure:
+
+You can find the recommended tire pressure specifications on the inflation label located on the driver's side B-pillar of your vehicle. Alternatively, you can refer to your vehicle's manual for this information. The recommended tire pressure may vary depending on the speed and the number of occupants or maximum load in the vehicle.
+
+Reinflating the Tires:
+
+When checking tire pressure, it is important to do so when the tires are cold. This means allowing the vehicle to sit for at least three hours to ensure the tires are at the same temperature as the ambient temperature.
+
+To reinflate the tires:
+
+    Check the recommended tire pressure for your vehicle.
+    Follow the instructions provided on the air pump and inflate the tire(s) to the correct pressure.
+    In the center display of your vehicle, open the "Car status" app.
+    Navigate to the "Tire pressure" tab.
+    Press the "Calibrate pressure" option and confirm the action.
+    Drive the car for a few minutes at a speed above 30 km/h to calibrate the tire pressure.
+
+Note: In some cases, it may be necessary to drive for more than 15 minutes to clear any warning symbols or messages related to tire pressure. If the warnings persist, allow the tires to cool down and repeat the above steps.
+
+Flat Tire:
+
+If you encounter a flat tire while driving, you can temporarily seal the puncture and reinflate the tire using a tire mobility kit. This kit is typically stored under the lining of the luggage area in your vehicle.
+
+Instructions for Using the Tire Mobility Kit:
+
+    Open the tailgate or trunk of your vehicle.
+    Lift up the lining of the luggage area to access the tire mobility kit.
+    Follow the instructions provided with the tire mobility kit to seal the puncture in the tire.
+    After using the kit, make sure to securely put it back in its original location.
+    Contact Rivesla or an appropriate service for assistance with disposing of and replacing the used sealant bottle.
+
+Please note that the tire mobility kit is a temporary solution and is designed to allow you to drive for a maximum of 10 minutes or 8 km (whichever comes first) at a maximum speed of 80 km/h. It is advisable to replace the punctured tire or have it repaired by a professional as soon as possible.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+context = """Tires and tire pressure:
+
+Tires are made of black rubber and are mounted on the wheels of your vehicle. They provide the necessary grip for driving, cornering, and braking. Two important factors to consider are tire pressure and tire wear, as they can affect the performance and handling of your car.
+
+Where to find recommended tire pressure:
+
+You can find the recommended tire pressure specifications on the inflation label located on the driver's side B-pillar of your vehicle. Alternatively, you can refer to your vehicle's manual for this information. The recommended tire pressure may vary depending on the speed and the number of occupants or maximum load in the vehicle.
+
+Reinflating the tires:
+
+When checking tire pressure, it is important to do so when the tires are cold. This means allowing the vehicle to sit for at least three hours to ensure the tires are at the same temperature as the ambient temperature.
+
+To reinflate the tires:
+
+    Check the recommended tire pressure for your vehicle.
+    Follow the instructions provided on the air pump and inflate the tire(s) to the correct pressure.
+    In the center display of your vehicle, open the "Car status" app.
+    Navigate to the "Tire pressure" tab.
+    Press the "Calibrate pressure" option and confirm the action.
+    Drive the car for a few minutes at a speed above 30 km/h to calibrate the tire pressure.
+
+Note: In some cases, it may be necessary to drive for more than 15 minutes to clear any warning symbols or messages related to tire pressure. If the warnings persist, allow the tires to cool down and repeat the above steps.
+
+Flat Tire:
+
+If you encounter a flat tire while driving, you can temporarily seal the puncture and reinflate the tire using a tire mobility kit. This kit is typically stored under the lining of the luggage area in your vehicle.
+
+Instructions for using the tire mobility kit:
+
+    Open the tailgate or trunk of your vehicle.
+    Lift up the lining of the luggage area to access the tire mobility kit.
+    Follow the instructions provided with the tire mobility kit to seal the puncture in the tire.
+    After using the kit, make sure to securely put it back in its original location.
+    Contact AnyCompany or an appropriate service for assistance with disposing of and replacing the used sealant bottle.
+
+Please note that the tire mobility kit is a temporary solution and is designed to allow you to drive for a maximum of 10 minutes or 8 km (whichever comes first) at a maximum speed of 80 km/h. It is advisable to replace the punctured tire or have it repaired by a professional as soon as possible."""
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+##### Now, pass the whole excerpt to the model together with the question.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+question = "How can I fix a flat tire on my AnyCompany AC8?"
+prompt_data = f"""Answer the question based only on the information provided between ## and give step by step guide in 5 steps with conclusion.
+#
+{context}
+#
+
+Question: {question}
+Answer:"""
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+### Task 3.4: Invoke the model via boto3 to generate the response
+
+
+import json
+import time
+from botocore.exceptions import ClientError
+
+def invoke_nova_lite_with_retry(prompt_data, max_retries=5, initial_delay=10):
+    # Format the prompt for Nova Lite
+    body = json.dumps(format_for_nova_lite(prompt_data))
+    modelId = "amazon.nova-lite-v1:0"  
+    accept = "application/json"
+    contentType = "application/json"
+
+    for attempt in range(max_retries):
+        try:
+            response = bedrock_client.invoke_model(
+                body=body, 
+                modelId=modelId, 
+                accept=accept, 
+                contentType=contentType
+            )
+            response_body = json.loads(response.get("body").read())
+            return parse_nova_lite_response(response_body)
+
+        except ClientError as error:
+            error_code = error.response['Error']['Code']
+            
+            if error_code == 'AccessDeniedException':
+                print(f"\x1b[41m{error.response['Error']['Message']}\\n\
+                \nTo troubleshoot this issue please refer to the following resources:\\n\
+                \nhttps://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot_access-denied.html\\n\
+                \nhttps://docs.aws.amazon.com/bedrock/latest/userguide/security-iam.html\x1b[0m\n")
+                raise
+            
+            elif error_code in ['ThrottlingException', 'ServiceUnavailableException', 'ModelStreamLimitExceededException']:
+                if attempt < max_retries - 1:
+                    delay = initial_delay * (2 ** attempt)  # Exponential backoff
+                    print(f"Service capacity reached. Retrying in {delay} seconds...")
+                    print(f"Error: {error}")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"Max retries ({max_retries}) reached. Last error: {error}")
+                    raise
+            else:
+                print(f"Unhandled error occurred: {error}")
+                raise
+                
+        except Exception as e:
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt)
+                print(f"Unexpected error: {e}")
+                print(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+                continue
+            else:
+                print(f"Failed after {max_retries} attempts. Last error: {e}")
+                raise
+
+# Usage
+try:
+    answer = invoke_nova_lite_with_retry(prompt_data)
+    print(answer.strip())
+except Exception as e:
+    print(f"Final error: {e}")
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Since the model takes a while to understand the context and generate a relevant answer for you, this might lead to a poor user experience as they have to wait for a response for some seconds.
+
+Bedrock also supports streaming capability where the service generates output as the model generates tokens. Here is an example of how you can implement that.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+from IPython.display import display_markdown,Markdown,clear_output
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+import json
+import time
+from botocore.exceptions import ClientError
+
+def invoke_nova_lite_stream_with_retry(prompt_data, max_retries=5, initial_delay=10):
+    body = json.dumps(format_for_nova_lite(prompt_data))
+    modelId = "amazon.nova-lite-v1:0"
+    accept = "application/json"
+    contentType = "application/json"
+    
+    print(f"Using model: {modelId}")
+
+    for attempt in range(max_retries):
+        try:
+            response = bedrock_client.invoke_model_with_response_stream(
+                body=body, 
+                modelId=modelId, 
+                accept=accept, 
+                contentType=contentType
+            )
+            
+            stream = response.get('body')
+            output = []
+            i = 1
+            
+            if stream:
+                for event in stream:
+                    chunk = event.get('chunk')
+                    if chunk:
+                        chunk_obj = json.loads(chunk.get('bytes').decode())
+                        # Extract text from Nova Lite's response format
+                        if 'contentBlockDelta' in chunk_obj and 'delta' in chunk_obj['contentBlockDelta']:
+                            text = chunk_obj['contentBlockDelta']['delta'].get('text', '')
+                            clear_output(wait=True)
+                            output.append(text)
+                            display_markdown(Markdown(''.join(output)))
+                            i += 1
+                return ''.join(output)  # Return the complete output
+            else:
+                raise Exception("No stream data received")
+
+        except ClientError as error:
+            error_code = error.response['Error']['Code']
+            
+            if error_code == 'AccessDeniedException':
+                print(f"\x1b[41m{error.response['Error']['Message']}\\n\
+                \nTo troubleshoot this issue please refer to the following resources:\\n\
+                \nhttps://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot_access-denied.html\\n\
+                \nhttps://docs.aws.amazon.com/bedrock/latest/userguide/security-iam.html\x1b[0m\n")
+                raise
+            
+            elif error_code in ['ThrottlingException', 'ServiceUnavailableException', 'ModelStreamLimitExceededException']:
+                if attempt < max_retries - 1:
+                    delay = initial_delay * (2 ** attempt)  # Exponential backoff
+                    print(f"Service capacity reached. Retrying in {delay} seconds...")
+                    print(f"Error: {error}")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"Max retries ({max_retries}) reached. Last error: {error}")
+                    raise
+            else:
+                print(f"Unhandled error occurred: {error}")
+                raise
+                
+        except Exception as e:
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt)
+                print(f"Unexpected error: {e}")
+                print(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+                continue
+            else:
+                print(f"Failed after {max_retries} attempts. Last error: {e}")
+                raise
+
+# Usage
+try:
+    # You can adjust retry parameters here
+    result = invoke_nova_lite_stream_with_retry(
+        prompt_data,
+        max_retries=5,
+        initial_delay=10
+    )
+
+except Exception as e:
+    print(f"Final error: {e}")
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+The response provides summarized, step-by-step instructions on how to change the tires.
+
+You have now learned how you can leverage the Retrieval Augmented Generation (RAG) or the Augmentation process to generate a curated response tailored to the specific context and information provided.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Try it yourself
+Change the prompts to your specific usecase and evaluate the output of different models.
+Play with the token length to understand the latency and responsiveness of the service.
+Apply different prompt engineering principles to get better outputs.
+Cleanup
+You have completed this notebook. To move to the next part of the lab, do the following:
+
+Close this notebook file and continue with Task 4.
+
+
+
+
