@@ -1,0 +1,177 @@
+Task 5: Invoke Bedrock model for code generation
+In this notebook, you learn how to use a large language model (LLM) to generate code based on a text prompt.
+
+The prompt used in this notebook is a zero-shot prompt, as we are not providing any examples of text other than the prompt itself.
+
+To demonstrate the code generation capability of models in Amazon Bedrock, you take the use case of code generation. You explore using the Boto3 client to communicate with the Amazon Bedrock API and provide the API with an input consisting of a task, an instruction and an input for the model under the hood to generate an output without providing any additional example. The purpose here is to demonstrate how the powerful LLMs easily understand the task at hand and generate compelling outputs.
+
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Scenario
+You are Moe, a Data Analyst, at AnyCompany. The company wants to understand its sales performance for different products over the past year. You have been provided a dataset named sales.csv. The dataset contains the following columns:
+
+Date (YYYY-MM-DD) format
+Product_ID (unique identifer for each product)
+Price (price at which each product was sold)
+In this notebook, you learn how to generate code for a given prompt. You use the Amazon Nova Lite model using the Amazon Bedrock API with Boto3 client.
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Task 5.1: Environment setup
+
+#create a service client by name using the default session.
+import json
+import os
+import sys
+
+import boto3
+
+module_path = ".."
+sys.path.append(os.path.abspath(module_path))
+bedrock_client = boto3.client('bedrock-runtime',region_name=os.environ.get("AWS_DEFAULT_REGION", None))
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Code Generation
+
+In this task, you prepare an input for the Amazon Bedrock service to generate python program for your use-case.
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+create sales.csv file
+import csv
+
+data = [
+    ["date", "product_id", "price", "units_sold"],
+    ["2023-01-01", "P001", 50, 20],
+    ["2023-01-02", "P002", 60, 15],
+    ["2023-01-03", "P001", 50, 18],
+    ["2023-01-04", "P003", 70, 30],
+    ["2023-01-05", "P001", 50, 25],
+    ["2023-01-06", "P002", 60, 22],
+    ["2023-01-07", "P003", 70, 24],
+    ["2023-01-08", "P001", 50, 28],
+    ["2023-01-09", "P002", 60, 17],
+    ["2023-01-10", "P003", 70, 29],
+    ["2023-02-11", "P001", 50, 23],
+    ["2023-02-12", "P002", 60, 19],
+    ["2023-02-13", "P001", 50, 21],
+    ["2023-02-14", "P003", 70, 31],
+    ["2023-03-15", "P001", 50, 26],
+    ["2023-03-16", "P002", 60, 20],
+    ["2023-03-17", "P003", 70, 33],
+    ["2023-04-18", "P001", 50, 27],
+    ["2023-04-19", "P002", 60, 18],
+    ["2023-04-20", "P003", 70, 32],
+    ["2023-04-21", "P001", 50, 22],
+    ["2023-04-22", "P002", 60, 16],
+    ["2023-04-23", "P003", 70, 34],
+    ["2023-05-24", "P001", 50, 24],
+    ["2023-05-25", "P002", 60, 21]
+]
+
+# Write data to sales.csv
+with open('sales.csv', 'w', newline='') as csvfile:
+    writer = csv.writer(csvfile)
+    writer.writerows(data)
+
+print("sales.csv has been created!")
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+## Task 5.3: Analyzing sales with Amazon Bedrock generated Python program
+
+
+# Create the prompt
+# Analyzing sales
+
+prompt_data = """
+
+You have a CSV, sales.csv, with columns:
+- date (YYYY-MM-DD)
+- product_id
+- price
+- units_sold
+
+Create a python program to analyze the sales data from a CSV file. The program should be able to read the data, and determine below:
+
+- Total revenue for the year
+- Total revenue by product 
+- The product with the highest revenue 
+- The date with the highest revenue and the revenue achieved on that date
+- Visualize monthly sales using a bar chart
+
+Ensure the code is syntactically correct, bug-free, optimized, not span multiple lines unnessarily, and prefer to use standard libraries. Return only python code without any surrounding text, explanation or context.
+
+"""
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+body = json.dumps({
+    "messages": [
+        {
+            "role": "user",
+            "content": [{"text": prompt_data}]
+        }
+    ],
+    "inferenceConfig": {
+        "maxTokens": 8192,
+        "stopSequences": [],
+        "temperature": 0,
+        "topP": 0.9
+    }
+}) 
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Task 5.4: Invoke the model
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+modelId = "amazon.nova-lite-v1:0"
+response = bedrock_client.invoke_model(body=body, modelId=modelId)
+response_body = json.loads(response.get('body').read())
+#output_list = response_body.get('content', [])[0].get("text", "")
+output_list = response_body['output']['message']['content'][0]['text']
+print(output_list)
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+You have now experimented with using `boto3` SDK which provides a vanilla exposure to Amazon Bedrock API. Using this API you generate a python program to analyze and visualize given sales data.
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Try it yourself
+Change the prompts to your specific usecase and evaluate the output of different models.
+Play with the token length to understand the latency and responsiveness of the service.
+Apply different prompt engineering principles to get better outputs.
+Cleanup
+You have completed this notebook. To move to the next part of the lab, do the following:
+
+Close this notebook file and continue with the Task6
+
+
+
+
+
+
+
+
+
+
+
+
+
